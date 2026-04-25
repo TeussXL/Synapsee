@@ -1,0 +1,415 @@
+import { useEffect, useState } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import type { User } from "@supabase/supabase-js";
+
+export interface FeedPost {
+  id: string;
+  user_id: string;
+  content: string;
+  media_url: string | null;
+  media_type: string | null;
+  likes_count: number;
+  comments_count: number;
+  created_at: string;
+  author: {
+    display_name: string;
+    handle: string | null;
+    course: string | null;
+    semester: string | null;
+    role: string | null;
+  };
+  liked_by_me: boolean;
+}
+
+export const usePosts = (currentUser: User | null) => {
+  const [posts, setPosts] = useState<FeedPost[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const isMissingMediaSchemaError = (message?: string | null) => {
+    const text = (message ?? "").toLowerCase();
+    return (
+      text.includes("media_url") ||
+      text.includes("media_type") ||
+      text.includes("column")
+    );
+  };
+
+  const load = async () => {
+    setLoading(true);
+    const { data: rawPosts, error: selectError } = await supabase
+      .from("posts")
+      .select(
+        "id, user_id, content, media_url, media_type, likes_count, comments_count, created_at",
+      )
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    if (selectError && isMissingMediaSchemaError(selectError.message)) {
+      const { data: legacyPosts, error: legacyError } = await supabase
+        .from("posts")
+        .select("id, user_id, content, likes_count, comments_count, created_at")
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (legacyError || !legacyPosts || legacyPosts.length === 0) {
+        setPosts([]);
+        setLoading(false);
+        return;
+      }
+
+      const normalized = legacyPosts.map((post) => ({
+        ...post,
+        media_url: null,
+        media_type: null,
+      }));
+
+      const userIds = Array.from(new Set(normalized.map((p) => p.user_id)));
+      const [{ data: profiles }, { data: roles }, { data: myLikes }] =
+        await Promise.all([
+          supabase
+            .from("profiles")
+            .select("user_id, display_name, handle, course, semester")
+            .in("user_id", userIds),
+          supabase
+            .from("user_roles")
+            .select("user_id, role")
+            .in("user_id", userIds),
+          currentUser
+            ? supabase
+                .from("post_likes")
+                .select("post_id")
+                .eq("user_id", currentUser.id)
+                .in(
+                  "post_id",
+                  normalized.map((p) => p.id),
+                )
+            : Promise.resolve({ data: [] as { post_id: string }[] }),
+        ]);
+
+      const profileMap = new Map((profiles ?? []).map((p) => [p.user_id, p]));
+      const roleMap = new Map((roles ?? []).map((r) => [r.user_id, r.role]));
+      const likedSet = new Set((myLikes ?? []).map((l) => l.post_id));
+
+      setPosts(
+        normalized.map((p) => {
+          const prof = profileMap.get(p.user_id);
+          return {
+            ...p,
+            author: {
+              display_name: prof?.display_name ?? "Usuário",
+              handle: prof?.handle ?? null,
+              course: prof?.course ?? null,
+              semester: prof?.semester ?? null,
+              role: roleMap.get(p.user_id) ?? null,
+            },
+            liked_by_me: likedSet.has(p.id),
+          };
+        }),
+      );
+      setLoading(false);
+      return;
+    }
+
+    if (!rawPosts || rawPosts.length === 0) {
+      setPosts([]);
+      setLoading(false);
+      return;
+    }
+
+    const userIds = Array.from(new Set(rawPosts.map((p) => p.user_id)));
+    const [{ data: profiles }, { data: roles }, { data: myLikes }] =
+      await Promise.all([
+        supabase
+          .from("profiles")
+          .select("user_id, display_name, handle, course, semester")
+          .in("user_id", userIds),
+        supabase
+          .from("user_roles")
+          .select("user_id, role")
+          .in("user_id", userIds),
+        currentUser
+          ? supabase
+              .from("post_likes")
+              .select("post_id")
+              .eq("user_id", currentUser.id)
+              .in(
+                "post_id",
+                rawPosts.map((p) => p.id),
+              )
+          : Promise.resolve({ data: [] as { post_id: string }[] }),
+      ]);
+
+    const profileMap = new Map((profiles ?? []).map((p) => [p.user_id, p]));
+    const roleMap = new Map((roles ?? []).map((r) => [r.user_id, r.role]));
+    const likedSet = new Set((myLikes ?? []).map((l) => l.post_id));
+
+    setPosts(
+      rawPosts.map((p) => {
+        const prof = profileMap.get(p.user_id);
+        return {
+          ...p,
+          author: {
+            display_name: prof?.display_name ?? "Usuário",
+            handle: prof?.handle ?? null,
+            course: prof?.course ?? null,
+            semester: prof?.semester ?? null,
+            role: roleMap.get(p.user_id) ?? null,
+          },
+          liked_by_me: likedSet.has(p.id),
+        };
+      }),
+    );
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    load();
+    // realtime
+    const ch = supabase
+      .channel("posts-feed")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "posts" },
+        () => load(),
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(ch);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id]);
+
+  const create = async (content: string, media?: File | null) => {
+    if (!currentUser) return { error: "Não autenticado" };
+
+    let mediaUrl: string | null = null;
+    let mediaType: string | null = null;
+
+    if (media) {
+      const isImage = media.type.startsWith("image/");
+      const isVideo = media.type.startsWith("video/");
+
+      if (!isImage && !isVideo) {
+        return { error: "Envie apenas fotos ou vídeos." };
+      }
+
+      const maxSize = 30 * 1024 * 1024;
+      if (media.size > maxSize) {
+        return { error: "Arquivo muito grande. Use até 30 MB." };
+      }
+
+      const extensionFromName = media.name.split(".").pop()?.toLowerCase();
+      const extensionFromType = isImage ? "jpg" : "mp4";
+      const extension = extensionFromName || extensionFromType;
+      const filePath = `${currentUser.id}/${crypto.randomUUID()}.${extension}`;
+
+      const upload = await supabase.storage
+        .from("post-media")
+        .upload(filePath, media, {
+          contentType: media.type,
+          upsert: false,
+        });
+
+      if (upload.error) {
+        const text = upload.error.message.toLowerCase();
+        if (text.includes("bucket") || text.includes("not found")) {
+          return {
+            error:
+              "Upload indisponível agora. Falta aplicar a migration de mídia no Supabase.",
+          };
+        }
+        return { error: upload.error.message };
+      }
+
+      const { data: publicUrl } = supabase.storage
+        .from("post-media")
+        .getPublicUrl(upload.data.path);
+      mediaUrl = publicUrl.publicUrl;
+      mediaType = media.type;
+    }
+
+    let { error } = await supabase.from("posts").insert({
+      user_id: currentUser.id,
+      content,
+      media_url: mediaUrl,
+      media_type: mediaType,
+    });
+
+    if (error && isMissingMediaSchemaError(error.message)) {
+      if (mediaUrl) {
+        const path = mediaUrl.split("/post-media/")[1];
+        if (path) {
+          await supabase.storage.from("post-media").remove([path]);
+        }
+      }
+
+      if (!content.trim()) {
+        return {
+          error:
+            "Seu banco ainda não suporta post com mídia. Envie texto por enquanto ou aplique as migrations.",
+        };
+      }
+
+      const fallback = await supabase.from("posts").insert({
+        user_id: currentUser.id,
+        content,
+      });
+      error = fallback.error;
+    }
+
+    if (error && mediaUrl) {
+      const path = mediaUrl.split("/post-media/")[1];
+      if (path) {
+        await supabase.storage.from("post-media").remove([path]);
+      }
+    }
+
+    if (!error) await load();
+    return { error: error?.message };
+  };
+
+  const toggleLike = async (post: FeedPost) => {
+    if (!currentUser) return;
+    // optimistic
+    setPosts((prev) =>
+      prev.map((p) =>
+        p.id === post.id
+          ? {
+              ...p,
+              liked_by_me: !p.liked_by_me,
+              likes_count: p.likes_count + (p.liked_by_me ? -1 : 1),
+            }
+          : p,
+      ),
+    );
+    if (post.liked_by_me) {
+      await supabase
+        .from("post_likes")
+        .delete()
+        .eq("post_id", post.id)
+        .eq("user_id", currentUser.id);
+    } else {
+      await supabase
+        .from("post_likes")
+        .insert({ post_id: post.id, user_id: currentUser.id });
+    }
+  };
+
+  const remove = async (postId: string) => {
+    await supabase.from("posts").delete().eq("id", postId);
+    await load();
+  };
+
+  return { posts, loading, create, toggleLike, remove, reload: load };
+};
+
+export interface PostComment {
+  id: string;
+  user_id: string;
+  content: string;
+  media_url: string | null;
+  media_type: string | null;
+  created_at: string;
+  author: { display_name: string; handle: string | null };
+}
+
+export const useComments = (
+  postId: string | null,
+  currentUser: User | null,
+) => {
+  const [comments, setComments] = useState<PostComment[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    if (!postId) return;
+    setLoading(true);
+    const { data: raw } = await supabase
+      .from("post_comments")
+      .select("id, user_id, content, media_url, media_type, created_at")
+      .eq("post_id", postId)
+      .order("created_at", { ascending: true });
+
+    if (!raw || raw.length === 0) {
+      setComments([]);
+      setLoading(false);
+      return;
+    }
+    const userIds = Array.from(new Set(raw.map((c) => c.user_id)));
+    const { data: profs } = await supabase
+      .from("profiles")
+      .select("user_id, display_name, handle")
+      .in("user_id", userIds);
+    const map = new Map((profs ?? []).map((p) => [p.user_id, p]));
+    setComments(
+      raw.map((c) => ({
+        ...c,
+        author: {
+          display_name: map.get(c.user_id)?.display_name ?? "Usuário",
+          handle: map.get(c.user_id)?.handle ?? null,
+        },
+      })),
+    );
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    if (postId) load();
+    else setComments([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [postId]);
+
+  const add = async (content: string, media?: File | null) => {
+    if (!currentUser || !postId) return;
+
+    let mediaUrl: string | null = null;
+    let mediaType: string | null = null;
+
+    if (media) {
+      const isImage = media.type.startsWith("image/");
+      const isVideo = media.type.startsWith("video/");
+
+      if (!isImage && !isVideo) {
+        return { error: "Envie apenas fotos ou vídeos." };
+      }
+
+      const maxSize = 15 * 1024 * 1024;
+      if (media.size > maxSize) {
+        return { error: "Arquivo muito grande. Use até 15 MB." };
+      }
+
+      const extensionFromName = media.name.split(".").pop()?.toLowerCase();
+      const extensionFromType = isImage ? "jpg" : "mp4";
+      const extension = extensionFromName || extensionFromType;
+      const filePath = `${currentUser.id}/${postId}/${crypto.randomUUID()}.${extension}`;
+
+      const upload = await supabase.storage
+        .from("comment-media")
+        .upload(filePath, media, {
+          contentType: media.type,
+          upsert: false,
+        });
+
+      if (upload.error) {
+        return { error: upload.error.message };
+      }
+
+      const { data: publicUrl } = supabase.storage
+        .from("comment-media")
+        .getPublicUrl(upload.data.path);
+      mediaUrl = publicUrl.publicUrl;
+      mediaType = media.type;
+    }
+
+    const { error } = await supabase.from("post_comments").insert({
+      post_id: postId,
+      user_id: currentUser.id,
+      content,
+      media_url: mediaUrl,
+      media_type: mediaType,
+    });
+    if (!error) await load();
+    return { error: error?.message };
+  };
+
+  return { comments, loading, add };
+};
