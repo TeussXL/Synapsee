@@ -9,7 +9,7 @@ interface ComposerProps {
   onSubmit: (
     content: string,
     media?: File | null,
-  ) => Promise<{ error?: string } | void>;
+  ) => Promise<{ error?: string; warning?: string } | void>;
   onClose: () => void;
 }
 
@@ -32,6 +32,9 @@ export const PostComposer = ({ profile, onSubmit, onClose }: ComposerProps) => {
     if (res && "error" in res && res.error) {
       toast.error(res.error);
     } else {
+      if (res && "warning" in res && res.warning) {
+        toast.warning(res.warning);
+      }
       toast.success("Publicado!");
       setValue("");
       setAttachment(null);

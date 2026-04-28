@@ -2,15 +2,15 @@ name: Deploy Vite (Synapsee)
 
 on:
   push:
-    branches: [ "main" ]
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    branches: ["main"]
 
 permissions:
   contents: read
   pages: write
   id-token: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -26,10 +26,10 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Install
-        run: npm install
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Build Vite
+      - name: Build project
         run: npm run build
 
       - name: Upload artifact

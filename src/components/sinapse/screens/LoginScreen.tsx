@@ -11,7 +11,9 @@ import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { SinapseLogo } from "../SinapseLogo";
 import {
+  isCompanyEmail,
   isModuloEmail,
+  isProfessorModuloEmail,
   orgSignUpSchema,
   personSignUpSchema,
   signInSchema,
@@ -19,6 +21,19 @@ import {
 
 type Account = "pessoa" | "instituicao" | "empresa";
 type Mode = "signin" | "signup";
+
+const expectedAccountByRole = {
+  aluno: "pessoa",
+  professor: "instituicao",
+  instituicao: "instituicao",
+  empresa: "empresa",
+  admin: "instituicao",
+} as const;
+
+const isRateLimitError = (message: string) => {
+  const text = message.toLowerCase();
+  return text.includes("rate limit") || text.includes("too many requests");
+};
 
 const buildUniqueHandle = (email: string) => {
   const [localPart = "user", domainPart = "modulo"] = email
@@ -55,17 +70,80 @@ export const LoginScreen = () => {
       toast.error(parsed.error.issues[0].message);
       return;
     }
+
+    if (account === "empresa" && !isCompanyEmail(parsed.data.email)) {
+      toast.error("Para Empresa, use um e-mail corporativo da empresa.");
+      return;
+    }
+
+    if (
+      account === "instituicao" &&
+      !isProfessorModuloEmail(parsed.data.email)
+    ) {
+      toast.error(
+        "Para Instituição, use seu e-mail docente (@prof.modulo.edu.br).",
+      );
+      return;
+    }
+
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({
+    const { data, error } = await supabase.auth.signInWithPassword({
       email: parsed.data.email,
       password: parsed.data.password,
     });
+
+    if (!error && data.user) {
+      const [{ data: roleRow }, { data: profileRow }] = await Promise.all([
+        supabase
+          .from("user_roles")
+          .select("role")
+          .eq("user_id", data.user.id)
+          .maybeSingle(),
+        supabase
+          .from("profiles")
+          .select("account_type")
+          .eq("user_id", data.user.id)
+          .maybeSingle(),
+      ]);
+
+      const role = roleRow?.role as
+        | keyof typeof expectedAccountByRole
+        | undefined;
+      const expectedByRole = role ? expectedAccountByRole[role] : undefined;
+      const expectedByProfile =
+        profileRow?.account_type === "pessoa" ||
+        profileRow?.account_type === "instituicao" ||
+        profileRow?.account_type === "empresa"
+          ? profileRow.account_type
+          : undefined;
+
+      const expectedAccount = expectedByRole ?? expectedByProfile;
+      if (expectedAccount && expectedAccount !== account) {
+        await supabase.auth.signOut();
+        setLoading(false);
+        const label =
+          expectedAccount === "pessoa"
+            ? "Pessoa"
+            : expectedAccount === "instituicao"
+              ? "Instituição"
+              : "Empresa";
+        toast.error(`Este usuário deve entrar pela opção ${label}.`);
+        return;
+      }
+    }
+
     setLoading(false);
     if (error) {
-      if (error.message.toLowerCase().includes("invalid")) {
+      if (isRateLimitError(error.message)) {
+        toast.error(
+          "Supabase limitou o envio de e-mails por um tempo. Tente novamente mais tarde ou desative a confirmação por e-mail no Dashboard.",
+        );
+      } else if (error.message.toLowerCase().includes("invalid")) {
         toast.error("E-mail ou senha incorretos.");
       } else if (error.message.toLowerCase().includes("not confirmed")) {
-        toast.error("Confirme seu e-mail antes de entrar.");
+        toast.error(
+          "Sua conta ainda não está liberada no Supabase. Em ambiente de teste, desative a confirmação de e-mail no Dashboard.",
+        );
       } else {
         toast.error(error.message);
       }
@@ -88,9 +166,24 @@ export const LoginScreen = () => {
       return;
     }
 
+    if (account === "empresa" && !isCompanyEmail(parsed.data.email)) {
+      toast.error("Cadastro de Empresa exige e-mail corporativo da empresa.");
+      return;
+    }
+
+    if (
+      account === "instituicao" &&
+      !isProfessorModuloEmail(parsed.data.email)
+    ) {
+      toast.error(
+        "Cadastro de Instituição exige e-mail docente (@prof.modulo.edu.br).",
+      );
+      return;
+    }
+
     setLoading(true);
     const handle = buildUniqueHandle(parsed.data.email);
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email: parsed.data.email,
       password: parsed.data.password,
       options: {
@@ -108,7 +201,11 @@ export const LoginScreen = () => {
     setLoading(false);
 
     if (error) {
-      if (error.message.toLowerCase().includes("registered")) {
+      if (isRateLimitError(error.message)) {
+        toast.error(
+          "Supabase limitou o envio de e-mails por um tempo. Tente novamente mais tarde ou desative a confirmação por e-mail no Dashboard.",
+        );
+      } else if (error.message.toLowerCase().includes("registered")) {
         toast.error("Este e-mail já está cadastrado. Faça login.");
         setMode("signin");
       } else if (
@@ -123,8 +220,13 @@ export const LoginScreen = () => {
       return;
     }
 
+    if (data.session) {
+      toast.success("Conta criada e logada com sucesso.");
+      return;
+    }
+
     toast.success(
-      "Conta criada! Verifique seu e-mail para confirmar e entrar.",
+      "Conta criada. Agora você já pode entrar com e-mail e senha.",
     );
     setMode("signin");
   };

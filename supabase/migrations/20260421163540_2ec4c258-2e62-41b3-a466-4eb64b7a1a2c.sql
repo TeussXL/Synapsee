@@ -1,4 +1,4 @@
--- Enum de papéis no Sinapse
+-- Enum de papéis no Synapse
 CREATE TYPE public.app_role AS ENUM ('aluno', 'professor', 'instituicao', 'empresa', 'admin');
 
 -- Tabela de perfis (dados públicos do usuário)

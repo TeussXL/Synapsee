@@ -12,6 +12,7 @@ export interface SinapseProfile {
   semester: string | null;
   bio: string | null;
   avatar_url: string | null;
+  last_username_change: string | null;
 }
 
 export type SinapseRole =
@@ -37,9 +38,15 @@ export const useAuth = () => {
         if (!newSession) {
           setProfile(null);
           setRole(null);
+          setLoading(false);
         } else {
+          setLoading(true);
           // Defer Supabase calls to avoid deadlocks inside the callback
-          setTimeout(() => loadProfileAndRole(newSession.user.id), 0);
+          setTimeout(() => {
+            void loadProfileAndRole(newSession.user).finally(() =>
+              setLoading(false),
+            );
+          }, 0);
         }
       },
     );
@@ -47,14 +54,42 @@ export const useAuth = () => {
     supabase.auth.getSession().then(({ data: { session: existing } }) => {
       setSession(existing);
       setUser(existing?.user ?? null);
-      if (existing) loadProfileAndRole(existing.user.id);
-      setLoading(false);
+      if (existing) {
+        setLoading(true);
+        loadProfileAndRole(existing.user).finally(() => setLoading(false));
+      } else {
+        setLoading(false);
+      }
     });
 
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  const loadProfileAndRole = async (uid: string) => {
+  const loadProfileAndRole = async (authUser: User) => {
+    const uid = authUser.id;
+    const email = authUser.email ?? "";
+    const metadata = authUser.user_metadata ?? {};
+    const displayName =
+      typeof metadata.display_name === "string" && metadata.display_name.trim()
+        ? metadata.display_name.trim()
+        : email.split("@")[0] || "Usuário";
+    const handle =
+      typeof metadata.handle === "string" && metadata.handle.trim()
+        ? metadata.handle.trim()
+        : email.split("@")[0] || null;
+    const accountType =
+      typeof metadata.account_type === "string" && metadata.account_type.trim()
+        ? metadata.account_type.trim()
+        : "pessoa";
+    const course =
+      typeof metadata.course === "string" && metadata.course.trim()
+        ? metadata.course.trim()
+        : null;
+    const semester =
+      typeof metadata.semester === "string" && metadata.semester.trim()
+        ? metadata.semester.trim()
+        : null;
+
     const [{ data: p }, { data: r }] = await Promise.all([
       supabase.from("profiles").select("*").eq("user_id", uid).maybeSingle(),
       supabase
@@ -63,8 +98,59 @@ export const useAuth = () => {
         .eq("user_id", uid)
         .maybeSingle(),
     ]);
-    if (p) setProfile(p as SinapseProfile);
-    if (r) setRole(r.role as SinapseRole);
+
+    if (!p) {
+      const { data: insertedProfile } = await supabase
+        .from("profiles")
+        .insert({
+          user_id: uid,
+          display_name: displayName,
+          handle,
+          email,
+          account_type: accountType,
+          course,
+          semester,
+        })
+        .select("*")
+        .maybeSingle();
+
+      if (insertedProfile) {
+        setProfile(insertedProfile as SinapseProfile);
+      }
+    } else {
+      setProfile(p as SinapseProfile);
+    }
+
+    if (!r) {
+      const nextRole: SinapseRole =
+        accountType === "instituicao"
+          ? "instituicao"
+          : accountType === "empresa"
+            ? "empresa"
+            : email.endsWith("@prof.modulo.edu.br") ||
+                email.endsWith("@modulo.edu.br")
+              ? "professor"
+              : "aluno";
+
+      const { data: insertedRole } = await supabase
+        .from("user_roles")
+        .insert({ user_id: uid, role: nextRole })
+        .select("role")
+        .maybeSingle();
+
+      if (insertedRole) {
+        setRole(insertedRole.role as SinapseRole);
+      }
+    } else {
+      setRole(r.role as SinapseRole);
+    }
+
+    const { data: refreshedProfile } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (refreshedProfile) setProfile(refreshedProfile as SinapseProfile);
   };
 
   const signOut = async () => {

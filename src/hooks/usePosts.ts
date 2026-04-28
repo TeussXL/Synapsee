@@ -28,19 +28,36 @@ export const usePosts = (currentUser: User | null) => {
   const isMissingMediaSchemaError = (message?: string | null) => {
     const text = (message ?? "").toLowerCase();
     return (
+      text.includes("schema cache") ||
       text.includes("media_url") ||
       text.includes("media_type") ||
       text.includes("column")
     );
   };
 
+  const isMissingStorageBucketError = (message?: string | null) => {
+    const text = (message ?? "").toLowerCase();
+    return (
+      text.includes("bucket not found") ||
+      text.includes("bucket") ||
+      text.includes("not found")
+    );
+  };
+
   const load = async () => {
+    if (!currentUser) {
+      setPosts([]);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     const { data: rawPosts, error: selectError } = await supabase
       .from("posts")
       .select(
         "id, user_id, content, media_url, media_type, likes_count, comments_count, created_at",
       )
+      .eq("user_id", currentUser.id)
       .order("created_at", { ascending: false })
       .limit(50);
 
@@ -48,6 +65,7 @@ export const usePosts = (currentUser: User | null) => {
       const { data: legacyPosts, error: legacyError } = await supabase
         .from("posts")
         .select("id, user_id, content, likes_count, comments_count, created_at")
+        .eq("user_id", currentUser.id)
         .order("created_at", { ascending: false })
         .limit(50);
 
@@ -211,21 +229,27 @@ export const usePosts = (currentUser: User | null) => {
         });
 
       if (upload.error) {
-        const text = upload.error.message.toLowerCase();
-        if (text.includes("bucket") || text.includes("not found")) {
-          return {
-            error:
-              "Upload indisponível agora. Falta aplicar a migration de mídia no Supabase.",
-          };
+        if (isMissingStorageBucketError(upload.error.message)) {
+          if (!content.trim()) {
+            return {
+              error:
+                "O banco ainda não tem o bucket de mídia. Envie texto ou aplique a migration.",
+            };
+          }
+          mediaUrl = null;
+          mediaType = null;
+        } else {
+          return { error: upload.error.message };
         }
-        return { error: upload.error.message };
       }
 
-      const { data: publicUrl } = supabase.storage
-        .from("post-media")
-        .getPublicUrl(upload.data.path);
-      mediaUrl = publicUrl.publicUrl;
-      mediaType = media.type;
+      if (!mediaUrl && upload.data) {
+        const { data: publicUrl } = supabase.storage
+          .from("post-media")
+          .getPublicUrl(upload.data.path);
+        mediaUrl = publicUrl.publicUrl;
+        mediaType = media.type;
+      }
     }
 
     let { error } = await supabase.from("posts").insert({
@@ -255,6 +279,21 @@ export const usePosts = (currentUser: User | null) => {
         content,
       });
       error = fallback.error;
+      if (!error && media) {
+        return {
+          error: undefined,
+          warning:
+            "Seu banco ainda não suporta mídia em posts. O texto foi publicado sem a foto/vídeo.",
+        };
+      }
+    }
+
+    if (!error && media && !mediaUrl) {
+      return {
+        error: undefined,
+        warning:
+          "Seu banco ainda não suporta mídia em posts. O texto foi publicado sem a foto/vídeo.",
+      };
     }
 
     if (error && mediaUrl) {
@@ -320,14 +359,74 @@ export const useComments = (
   const [comments, setComments] = useState<PostComment[]>([]);
   const [loading, setLoading] = useState(false);
 
+  const isMissingMediaSchemaError = (message?: string | null) => {
+    const text = (message ?? "").toLowerCase();
+    return (
+      text.includes("schema cache") ||
+      text.includes("media_url") ||
+      text.includes("media_type") ||
+      text.includes("column")
+    );
+  };
+
+  const isMissingStorageBucketError = (message?: string | null) => {
+    const text = (message ?? "").toLowerCase();
+    return (
+      text.includes("bucket not found") ||
+      text.includes("bucket") ||
+      text.includes("not found")
+    );
+  };
+
   const load = async () => {
-    if (!postId) return;
+    if (!postId || !currentUser) {
+      setComments([]);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
-    const { data: raw } = await supabase
+    const { data: raw, error: selectError } = await supabase
       .from("post_comments")
       .select("id, user_id, content, media_url, media_type, created_at")
       .eq("post_id", postId)
+      .eq("user_id", currentUser.id)
       .order("created_at", { ascending: true });
+
+    if (selectError && isMissingMediaSchemaError(selectError.message)) {
+      const { data: legacyRaw, error: legacyError } = await supabase
+        .from("post_comments")
+        .select("id, user_id, content, created_at")
+        .eq("post_id", postId)
+        .eq("user_id", currentUser.id)
+        .order("created_at", { ascending: true });
+
+      if (legacyError || !legacyRaw || legacyRaw.length === 0) {
+        setComments([]);
+        setLoading(false);
+        return;
+      }
+
+      const userIds = Array.from(new Set(legacyRaw.map((c) => c.user_id)));
+      const { data: profs } = await supabase
+        .from("profiles")
+        .select("user_id, display_name, handle")
+        .in("user_id", userIds);
+      const map = new Map((profs ?? []).map((p) => [p.user_id, p]));
+      setComments(
+        legacyRaw.map((c) => ({
+          ...c,
+          media_url: null,
+          media_type: null,
+          author: {
+            display_name: map.get(c.user_id)?.display_name ?? "Usuário",
+            handle: map.get(c.user_id)?.handle ?? null,
+          },
+        })),
+      );
+      setLoading(false);
+      return;
+    }
 
     if (!raw || raw.length === 0) {
       setComments([]);
@@ -390,26 +489,92 @@ export const useComments = (
         });
 
       if (upload.error) {
-        return { error: upload.error.message };
+        if (isMissingStorageBucketError(upload.error.message)) {
+          if (!content.trim()) {
+            return {
+              error:
+                "O banco ainda não tem o bucket de mídia. Envie texto ou aplique a migration.",
+            };
+          }
+          mediaUrl = null;
+          mediaType = null;
+        } else {
+          return { error: upload.error.message };
+        }
       }
 
-      const { data: publicUrl } = supabase.storage
-        .from("comment-media")
-        .getPublicUrl(upload.data.path);
-      mediaUrl = publicUrl.publicUrl;
-      mediaType = media.type;
+      if (!mediaUrl && upload.data) {
+        const { data: publicUrl } = supabase.storage
+          .from("comment-media")
+          .getPublicUrl(upload.data.path);
+        mediaUrl = publicUrl.publicUrl;
+        mediaType = media.type;
+      }
     }
 
-    const { error } = await supabase.from("post_comments").insert({
+    let { error } = await supabase.from("post_comments").insert({
       post_id: postId,
       user_id: currentUser.id,
       content,
       media_url: mediaUrl,
       media_type: mediaType,
     });
+
+    if (error && isMissingMediaSchemaError(error.message)) {
+      if (mediaUrl) {
+        const path = mediaUrl.split("/comment-media/")[1];
+        if (path) {
+          await supabase.storage.from("comment-media").remove([path]);
+        }
+      }
+
+      const fallback = await supabase.from("post_comments").insert({
+        post_id: postId,
+        user_id: currentUser.id,
+        content,
+      });
+      error = fallback.error;
+      if (!error && media) {
+        return {
+          error: undefined,
+          warning:
+            "Seu banco ainda não suporta mídia em comentários. O comentário foi publicado sem a foto/vídeo.",
+        };
+      }
+    }
+
+    if (!error && media && !mediaUrl) {
+      return {
+        error: undefined,
+        warning:
+          "Seu banco ainda não suporta mídia em comentários. O comentário foi publicado sem a foto/vídeo.",
+      };
+    }
+
     if (!error) await load();
     return { error: error?.message };
   };
 
-  return { comments, loading, add };
+  const remove = async (commentId: string) => {
+    if (!currentUser || !postId) return { error: "Não autenticado" };
+
+    const previousComments = comments;
+    setComments((prev) => prev.filter((comment) => comment.id !== commentId));
+
+    const { error } = await supabase
+      .from("post_comments")
+      .delete()
+      .eq("id", commentId)
+      .eq("post_id", postId)
+      .eq("user_id", currentUser.id);
+
+    if (error) {
+      setComments(previousComments);
+      return { error: error.message };
+    }
+
+    return { error: null };
+  };
+
+  return { comments, loading, add, remove };
 };

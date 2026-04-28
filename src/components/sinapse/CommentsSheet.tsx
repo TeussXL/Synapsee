@@ -24,7 +24,7 @@ export const CommentsSheet = ({
   currentUser,
   onClose,
 }: CommentsSheetProps) => {
-  const { comments, loading, add } = useComments(postId, currentUser);
+  const { comments, loading, add, remove } = useComments(postId, currentUser);
   const [value, setValue] = useState("");
   const [attachment, setAttachment] = useState<File | null>(null);
   const [sending, setSending] = useState(false);
@@ -45,6 +45,9 @@ export const CommentsSheet = ({
     setSending(false);
     if (res?.error) toast.error(res.error);
     else {
+      if (res && "warning" in res && res.warning) {
+        toast.warning(res.warning);
+      }
       setValue("");
       setAttachment(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -86,13 +89,28 @@ export const CommentsSheet = ({
                 <li key={c.id} className="flex gap-3">
                   <Avatar name={c.author.display_name} size="sm" />
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline gap-2">
-                      <p className="text-xs font-semibold">
-                        {c.author.display_name}
-                      </p>
-                      <span className="text-[10px] text-text-faint">
-                        {timeAgo(c.created_at)}
-                      </span>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex min-w-0 items-baseline gap-2">
+                        <p className="truncate text-xs font-semibold">
+                          {c.author.display_name}
+                        </p>
+                        <span className="shrink-0 text-[10px] text-text-faint">
+                          {timeAgo(c.created_at)}
+                        </span>
+                      </div>
+                      {currentUser?.id === c.user_id && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const res = await remove(c.id);
+                            if (res?.error) toast.error(res.error);
+                          }}
+                          className="rounded-full p-1 text-text-faint transition-smooth hover:bg-secondary hover:text-destructive"
+                          aria-label="Apagar comentário"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      )}
                     </div>
                     <p className="mt-0.5 text-sm leading-snug text-foreground/90">
                       {c.content}
